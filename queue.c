@@ -8,7 +8,7 @@ static atomic_t queue_size = ATOMIC_INIT(0);
 static struct task_struct* thread;
 static uint8_t thread_stopped;
 DECLARE_WAIT_QUEUE_HEAD(wait_queue);
-static atomic_t save_count = ATOMIC_INIT(0);
+static ssize_t save_count;
 
 static DEFINE_MUTEX(queue_rlock);
 static DEFINE_MUTEX(queue_wlock);
@@ -132,7 +132,7 @@ static int save_old_data(ssize_t arg)
         __save_data(d);
         mutex_unlock(&queue_rlock);
 
-        if (atomic_dec_and_test(&save_count) == 0)
+        if (--nr == 0)
             break;
     }
 
@@ -141,35 +141,27 @@ static int save_old_data(ssize_t arg)
 
 static int save_old_data_async(void* arg)
 {
-    struct data* d;
     DECLARE_WAITQUEUE(wq, current);
 
-    printk(KERN_INFO "kthread state is wait sleep\n");
+    pr_info("kthread add to wait_queue\n");
     add_wait_queue(&wait_queue, &wq);
 
-    // enter in a loop waiting on the queue untill termination event
     while (!thread_stopped)
     {
-        printk(KERN_INFO "kthread state is TASK_INTERRUPTIBLE\n");
+        pr_info("kthread set TASK_INTERRUPTIBLE\n");
         set_current_state(TASK_INTERRUPTIBLE);
-        // call the scheduler to release a CPU
         schedule();
-        // the thread has been woken up, the thread is woken up in TASK_RUNNING state
-        printk(KERN_INFO "thread has been woken up in\n");
 
-        list_for_each_entry_reverse(d, &queue, next) {
-            mutex_lock(&queue_rlock);
-            __save_data(d);
-            mutex_unlock(&queue_rlock);
+        pr_info("wake up kthread\n");
 
-            if (atomic_dec_and_test(&save_count))
-                break;
-        }
+        save_old_data(save_count);
+
+        save_count = 0;
     }
 
+    pr_info("kthread exit\n");
     set_current_state(TASK_RUNNING);
     remove_wait_queue(&wait_queue, &wq);
-    printk(KERN_INFO "kthread state is TASK_RUNNING\n");
 
     do_exit(0);
 
@@ -180,11 +172,10 @@ static long queue_ioctl(struct file* f, unsigned int ioctl, unsigned long count)
 {
     pr_info("ioctl %u %lu\n", ioctl, count);
 
-    if (ioctl == 1 && !atomic_read(&save_count)) {
-        atomic_set(&save_count, count);
+    if (ioctl == SAVE_SYNC && !save_count) {
         save_old_data(count);
-    } else if (ioctl == 0) {
-        atomic_set(&save_count, count);
+    } else if (ioctl == SAVE_ASYNC) {
+        save_count = count;
         wake_up(&wait_queue);
     }
 

@@ -18,7 +18,7 @@
 #define MAX_QUEUE_SIZE (1024)
 #define MAX_ELEM_SIZE (64*1024)
 
-enum { SAVE_SYNC, SAVE_ASYNC };
+enum { SAVE_SYNC = 1000, SAVE_ASYNC };
 
 struct data {
     struct list_head next;
