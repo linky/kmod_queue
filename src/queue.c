@@ -8,7 +8,7 @@ static atomic_t queue_size = ATOMIC_INIT(0);
 static struct task_struct* thread;
 static uint8_t thread_stopped;
 DECLARE_WAIT_QUEUE_HEAD(wait_queue);
-static ssize_t save_count;
+static atomic_t save_count = ATOMIC_INIT(0);
 
 static DEFINE_MUTEX(queue_rlock);
 static DEFINE_MUTEX(queue_wlock);
@@ -18,6 +18,7 @@ static int __load_data(struct data* d)
     char path[256];
     struct file* f;
 
+    // use pointer as unique filename
     snprintf(path, sizeof(path), "%s/%p", storage_dir, d->source);
     f = filp_open(path, O_RDONLY, 0700);
     d->source = kmalloc(d->len, GFP_KERNEL);
@@ -41,6 +42,7 @@ static int __save_data(struct data* d)
 
     pr_info("tail %s\n", d->source);
 
+    // use pointer as unique filename
     snprintf(path, sizeof(path), "%s/%p", storage_dir, d->source);
     f = filp_open(path, O_CREAT | O_RDWR | O_TRUNC, 0700);
     kernel_write(f, d->source, d->len, NULL); // vfs_write deprecated
@@ -106,6 +108,7 @@ static ssize_t pop_front(struct file* file, char __user* buf, size_t count, loff
 
     mutex_unlock(&queue_rlock);
 
+    // load data if it was saved on disk
     if (d->on_disk) {
         __load_data(d);
     }
@@ -119,18 +122,16 @@ static ssize_t pop_front(struct file* file, char __user* buf, size_t count, loff
     return ret;
 }
 
-static int save_old_data(ssize_t arg)
+// save nr tail messages to file
+static int __save_old_data(ssize_t nr)
 {
     struct data* d;
-    ssize_t nr = arg;
 
     if (nr <= 0)
         return 0;
 
     list_for_each_entry_reverse(d, &queue, next) {
-        mutex_lock(&queue_rlock);
         __save_data(d);
-        mutex_unlock(&queue_rlock);
 
         if (--nr == 0)
             break;
@@ -154,9 +155,9 @@ static int save_old_data_async(void* arg)
 
         pr_info("wake up kthread\n");
 
-        save_old_data(save_count);
+        __save_old_data(atomic_read(&save_count));
 
-        save_count = 0;
+        atomic_set(&save_count, 0);
     }
 
     pr_info("kthread exit\n");
@@ -172,10 +173,12 @@ static long queue_ioctl(struct file* f, unsigned int ioctl, unsigned long count)
 {
     pr_info("ioctl %u %lu\n", ioctl, count);
 
-    if (ioctl == SAVE_SYNC && !save_count) {
-        save_old_data(count);
-    } else if (ioctl == SAVE_ASYNC) {
-        save_count = count;
+    if (ioctl == SAVE_SYNC && !atomic_read(&save_count)) {
+        mutex_lock(&queue_rlock);
+        __save_old_data(count);
+        mutex_unlock(&queue_rlock);
+    } else if (ioctl == SAVE_ASYNC && !atomic_read(&save_count)) {
+        atomic_set(&save_count, count);
         wake_up(&wait_queue);
     }
 
@@ -188,6 +191,7 @@ static void queue_cleanup(void)
     char path[256];
     struct file* f;
 
+    mutex_lock(&queue_rlock);
     list_for_each_entry_reverse(d, &queue, next) {
         if (d->on_disk) {
             snprintf(path, sizeof(path), "%s/%p", storage_dir, d->source);
@@ -200,6 +204,7 @@ static void queue_cleanup(void)
 
         kfree(d);
     }
+    mutex_lock(&queue_rlock);
 }
 
 static int queue_init(void)
