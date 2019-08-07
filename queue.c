@@ -1,23 +1,6 @@
-#include <linux/module.h>
-#include <linux/printk.h>
-#include <linux/proc_fs.h>
-#include <linux/mutex.h>
-#include <linux/list.h>
-#include <linux/slab.h>
-#include <linux/uaccess.h>
-#include <linux/fs.h>
-#include <asm/atomic.h>
+#include "queue.h"
 
-#define PROC_NAME "queue_test"
-#define MAX_QUEUE_SIZE (1024)
-#define MAX_ELEM_SIZE (64*1024)
-
-struct data {
-    struct list_head next;
-    char* source;
-    uint16_t len;
-    uint8_t on_disk;
-};
+static const char storage_dir[128] = "/root/mnt";
 
 static struct list_head queue;
 static atomic_t queue_size = ATOMIC_INIT(0);
@@ -29,16 +12,14 @@ static int __load_data(struct data* d)
 {
     char path[256];
     struct file* f;
-    struct dentry *dir;
 
-    snprintf(path, sizeof(path), "/root/mnt/%p", d->source);
+    snprintf(path, sizeof(path), "%s/%p", storage_dir, d->source);
     f = filp_open(path, O_RDONLY, 0700);
-    dir = f->f_path.dentry;
     d->source = kmalloc(d->len, GFP_KERNEL);
-    kernel_read(f, d->source, d->len, NULL); // vfs_read is deprecated
-    filp_close(f, NULL);
+    kernel_read(f, d->source, d->len, NULL); // vfs_read deprecated
 
-    //vfs_unlink(dir->d_inode, dir, NULL);
+    vfs_unlink(f->f_path.dentry->d_parent->d_inode, f->f_path.dentry, NULL);
+    filp_close(f, NULL);
 
     d->on_disk = 0;
 
@@ -55,9 +36,9 @@ static int __save_data(struct data* d)
 
     pr_info("tail %s\n", d->source);
 
-    snprintf(path, sizeof(path), "/root/mnt/%p", d->source);
+    snprintf(path, sizeof(path), "%s/%p", storage_dir, d->source);
     f = filp_open(path, O_CREAT | O_RDWR | O_TRUNC, 0700);
-    kernel_write(f, d->source, d->len, NULL); // vfs_write is deprecated
+    kernel_write(f, d->source, d->len, NULL); // vfs_write deprecated
 
     filp_close(f, NULL);
     kfree(d->source);
@@ -66,16 +47,15 @@ static int __save_data(struct data* d)
     return 0;
 }
 
-ssize_t save_old_data(ssize_t nr)
+static ssize_t save_old_data(ssize_t nr)
 {
     struct data* d;
-    ssize_t ret = nr;
-    struct list_head* head = &queue;
+    ssize_t ret = 0;
 
     if (nr <= 0)
         return 0;
 
-    list_for_each_entry_reverse(d, head, next) {
+    list_for_each_entry_reverse(d, &queue, next) {
         __save_data(d);
 
         if (--nr == 0)
@@ -113,11 +93,9 @@ static ssize_t push_back(struct file* file, const char __user* buf, size_t count
     list_add_tail(&d->next, &queue);
     atomic_inc(&queue_size);
     pr_info("%s: count %zu ret %zd size %d\n", __FUNCTION__, count, ret, atomic_read(&queue_size));
+
 out:
     mutex_unlock(&queue_wlock);
-
-    if (atomic_read(&queue_size) > 10)
-        pr_info("saved %ld\n", save_old_data(5));
 
     return ret;
 }
@@ -156,7 +134,30 @@ static ssize_t pop_front(struct file* file, char __user* buf, size_t count, loff
 
 static long queue_ioctl(struct file* f, unsigned int ioctl, unsigned long count)
 {
+    if (ioctl == SAVE_SYNC)
+        save_old_data(count);
+
     return 0;
+}
+
+static void queue_cleanup(void)
+{
+    struct data* d;
+    char path[256];
+    struct file* f;
+
+    list_for_each_entry_reverse(d, &queue, next) {
+        if (d->on_disk) {
+            snprintf(path, sizeof(path), "%s/%p", storage_dir, d->source);
+            f = filp_open(path, O_RDWR, 0700);
+            vfs_unlink(f->f_path.dentry->d_parent->d_inode, f->f_path.dentry, NULL);
+            filp_close(f, NULL);
+        } else {
+            kfree(d->source);
+        }
+
+        kfree(d);
+    }
 }
 
 static int queue_init(void)
@@ -179,6 +180,8 @@ static int queue_init(void)
 static void queue_exit(void)
 {
     remove_proc_entry(PROC_NAME, NULL);
+    queue_cleanup();
+    pr_info("unload queue %s\n", PROC_NAME);
 }
 
 
