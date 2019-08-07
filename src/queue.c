@@ -21,7 +21,14 @@ static int __load_data(struct data* d)
     // use pointer as unique filename
     snprintf(path, sizeof(path), "%s/%p", storage_dir, d->source);
     f = filp_open(path, O_RDONLY, 0700);
+    if (!f)
+        return -EBADFD;
+
     d->source = kmalloc(d->len, GFP_KERNEL);
+    if (!d->source) {
+        filp_close(f, NULL);
+        return -ENOMEM;
+    }
     kernel_read(f, d->source, d->len, NULL); // vfs_read deprecated
 
     vfs_unlink(f->f_path.dentry->d_parent->d_inode, f->f_path.dentry, NULL);
@@ -45,6 +52,8 @@ static int __save_data(struct data* d)
     // use pointer as unique filename
     snprintf(path, sizeof(path), "%s/%p", storage_dir, d->source);
     f = filp_open(path, O_CREAT | O_RDWR | O_TRUNC, 0700);
+    if (!f)
+        return -EBADFD;
     kernel_write(f, d->source, d->len, NULL); // vfs_write deprecated
 
     filp_close(f, NULL);
@@ -110,7 +119,9 @@ static ssize_t pop_front(struct file* file, char __user* buf, size_t count, loff
 
     // load data if it was saved on disk
     if (d->on_disk) {
-        __load_data(d);
+        ret = __load_data(d);
+        if (ret)
+            return ret;
     }
 
     to_write = min((size_t) d->len, count);
