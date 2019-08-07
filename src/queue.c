@@ -1,6 +1,6 @@
 #include "queue.h"
 
-static const char* storage_dir = "/root/mnt";
+static const char* storage_dir = "/tmp";
 
 static struct list_head queue;
 static atomic_t queue_size = ATOMIC_INIT(0);
@@ -204,7 +204,7 @@ static void queue_cleanup(void)
 
         kfree(d);
     }
-    mutex_lock(&queue_rlock);
+    mutex_unlock(&queue_rlock);
 }
 
 static int queue_init(void)

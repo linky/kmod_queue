@@ -1,0 +1,8 @@
+#!/usr/bin/sh
+
+for ((i = 0; i < 100; ++i)); do
+	./queuectl push $i
+	echo "+ $i" >> /tmp/MESSAGES
+	sleep .4
+done
+

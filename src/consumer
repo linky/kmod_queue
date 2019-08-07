@@ -1,0 +1,6 @@
+#!/usr/bin/sh
+
+for ((i = 0; i < 100; ++i)); do
+	echo "- $(./queuectl pop)" >> /tmp/MESSAGES
+	sleep 0.5
+done

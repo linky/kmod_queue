@@ -6,3 +6,4 @@ all:
 	$(CC) queuectl.c -o queuectl
 clean:
 	make -C /lib/modules/$(KVERSION)/build M=$(PWD) clean
+	rm -f queuectl
