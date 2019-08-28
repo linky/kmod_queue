@@ -29,7 +29,7 @@ struct data {
 
 static int __load_data(struct data* d);
 static int __save_data(struct data* d);
-static int __save_old_data(ssize_t nr);
+static int save_old_data(atomic_t* nr);
 static int save_old_data_async(void* arg);
 static ssize_t push_back(struct file* file, const char __user* buf, size_t count, loff_t* ppos);
 static ssize_t pop_front(struct file* file, char __user* buf, size_t count, loff_t* ppos);

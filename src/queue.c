@@ -10,8 +10,7 @@ static uint8_t thread_stopped;
 DECLARE_WAIT_QUEUE_HEAD(wait_queue);
 static atomic_t save_count = ATOMIC_INIT(0);
 
-static DEFINE_MUTEX(queue_rlock);
-static DEFINE_MUTEX(queue_wlock);
+static DEFINE_MUTEX(queue_lock);
 
 static int __load_data(struct data* d)
 {
@@ -19,7 +18,7 @@ static int __load_data(struct data* d)
     struct file* f;
 
     // use pointer as unique filename
-    snprintf(path, sizeof(path), "%s/%p", storage_dir, d->source);
+    snprintf(path, sizeof(path), "%s/%p", storage_dir, d->source); // FIXME name
     f = filp_open(path, O_RDONLY, 0700);
     if (!f)
         return -EBADFD;
@@ -71,11 +70,8 @@ static ssize_t push_back(struct file* file, const char __user* buf, size_t count
     if (count > MAX_ELEM_SIZE)
         return -EINVAL;
 
-    if (atomic_read(&queue_size) >= MAX_QUEUE_SIZE)
+    if (!atomic_add_unless(&queue_size, 1, MAX_QUEUE_SIZE))
         return -ENOMEM;
-
-    if (mutex_lock_interruptible(&queue_wlock))
-        return -ERESTARTSYS;
 
     d = kmalloc(sizeof(struct data), GFP_KERNEL);
     d->source = kmalloc(count, GFP_KERNEL);
@@ -83,17 +79,16 @@ static ssize_t push_back(struct file* file, const char __user* buf, size_t count
     d->on_disk = 0;
     if (d->source == NULL) {
         kfree(d);
-        ret = -ENOMEM;
-        goto out;
+        return -ENOMEM;
     }
 
     ret = (copy_from_user(d->source, buf, count) ? -EFAULT : count);
-    list_add_tail(&d->next, &queue);
-    atomic_inc(&queue_size);
-    pr_info("%s: count %zu ret %zd size %d\n", __FUNCTION__, count, ret, atomic_read(&queue_size));
 
-out:
-    mutex_unlock(&queue_wlock);
+    mutex_lock(&queue_lock);
+    list_add_tail(&d->next, &queue);
+    mutex_unlock(&queue_lock);
+
+    pr_info("%s: count %zu ret %zd size %d\n", __FUNCTION__, count, ret, atomic_read(&queue_size));
 
     return ret;
 }
@@ -104,18 +99,13 @@ static ssize_t pop_front(struct file* file, char __user* buf, size_t count, loff
     ssize_t to_write;
     struct data* d;
 
-    mutex_lock(&queue_rlock);
-
-    if (list_empty(&queue)) {
-        mutex_unlock(&queue_rlock);
+    if (!atomic_add_unless(&queue_size, -1, 0))
         return -ENODATA;
-    }
 
+    mutex_lock(&queue_lock);
     d = list_entry(queue.next, struct data, next);
     list_del(queue.next);
-    atomic_dec(&queue_size);
-
-    mutex_unlock(&queue_rlock);
+    mutex_unlock(&queue_lock);
 
     // load data if it was saved on disk
     if (d->on_disk) {
@@ -134,19 +124,18 @@ static ssize_t pop_front(struct file* file, char __user* buf, size_t count, loff
 }
 
 // save nr tail messages to file
-static int __save_old_data(ssize_t nr)
+static int save_old_data(atomic_t* nr)
 {
     struct data* d;
 
-    if (nr <= 0)
-        return 0;
-
+    mutex_lock(&queue_lock);
     list_for_each_entry_reverse(d, &queue, next) {
         __save_data(d);
 
-        if (--nr == 0)
+        if (atomic_dec_and_test(nr))
             break;
     }
+    mutex_unlock(&queue_lock);
 
     return 0;
 }
@@ -166,9 +155,7 @@ static int save_old_data_async(void* arg)
 
         pr_info("wake up kthread\n");
 
-        __save_old_data(atomic_read(&save_count));
-
-        atomic_set(&save_count, 0);
+        save_old_data(&save_count);
     }
 
     pr_info("kthread exit\n");
@@ -185,9 +172,8 @@ static long queue_ioctl(struct file* f, unsigned int ioctl, unsigned long count)
     pr_info("ioctl %u %lu\n", ioctl, count);
 
     if (ioctl == SAVE_SYNC && !atomic_read(&save_count)) {
-        mutex_lock(&queue_rlock);
-        __save_old_data(count);
-        mutex_unlock(&queue_rlock);
+        atomic_set(&save_count, count);
+        save_old_data(&save_count);
     } else if (ioctl == SAVE_ASYNC && !atomic_read(&save_count)) {
         atomic_set(&save_count, count);
         wake_up(&wait_queue);
@@ -202,7 +188,7 @@ static void queue_cleanup(void)
     char path[256];
     struct file* f;
 
-    mutex_lock(&queue_rlock);
+    mutex_lock(&queue_lock);
     list_for_each_entry_reverse(d, &queue, next) {
         if (d->on_disk) {
             snprintf(path, sizeof(path), "%s/%p", storage_dir, d->source);
@@ -215,7 +201,7 @@ static void queue_cleanup(void)
 
         kfree(d);
     }
-    mutex_unlock(&queue_rlock);
+    mutex_unlock(&queue_lock);
 }
 
 static int queue_init(void)
