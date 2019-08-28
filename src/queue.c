@@ -162,8 +162,6 @@ static int save_old_data_async(void* arg)
     set_current_state(TASK_RUNNING);
     remove_wait_queue(&wait_queue, &wq);
 
-    do_exit(0);
-
     return 0;
 }
 
